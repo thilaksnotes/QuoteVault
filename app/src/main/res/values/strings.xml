@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="quote_widget_description">A scrollable reading highlight from your QuoteVault library, with favourite, delete and refresh actions.</string>
+</resources>
