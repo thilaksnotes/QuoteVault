@@ -58,6 +58,11 @@ class QuoteWidgetProvider : AppWidgetProvider() {
                 }
                 return
             }
+            ACTION_DELETE -> {
+                val quoteId = intent.getLongExtra(EXTRA_QUOTE_ID, -1L)
+                if (quoteId > 0L) deleteQuote(context, quoteId, goAsync())
+                return
+            }
         }
         super.onReceive(context, intent)
     }
@@ -78,6 +83,28 @@ class QuoteWidgetProvider : AppWidgetProvider() {
                 }
             } catch (error: Exception) {
                 android.util.Log.e(TAG, "Unable to toggle quote favourite from widget", error)
+            } finally {
+                pendingResult.finish()
+            }
+        }
+    }
+
+    private fun deleteQuote(
+        context: Context,
+        quoteId: Long,
+        pendingResult: BroadcastReceiver.PendingResult
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val dao = QuoteDatabase.getInstance(context).quoteDao()
+                val quote = dao.getById(quoteId)
+                if (quote != null) {
+                    dao.delete(quote)
+                    // The deleted quote is no longer available; update every widget immediately.
+                    updateWidgets(context, widgetIds(context), rotate = false)
+                }
+            } catch (error: Exception) {
+                android.util.Log.e(TAG, "Unable to delete quote from widget", error)
             } finally {
                 pendingResult.finish()
             }
@@ -195,10 +222,11 @@ class QuoteWidgetProvider : AppWidgetProvider() {
                 else R.drawable.ic_quote_star_outline
             )
 
-            val deleteIntent = Intent(context, MainActivity::class.java).apply {
-                putExtra(MainActivity.EXTRA_WIDGET_DELETE_QUOTE_ID, quote.id)
+            val deleteIntent = actionIntent(context, ACTION_DELETE, widgetId).apply {
+                putExtra(EXTRA_QUOTE_ID, quote.id)
+                data = Uri.parse("quotevault://widget/delete/$widgetId/${quote.id}")
             }
-            val deletePendingIntent = PendingIntent.getActivity(
+            val deletePendingIntent = PendingIntent.getBroadcast(
                 context,
                 widgetId + DELETE_REQUEST_CODE_OFFSET,
                 deleteIntent,
@@ -235,6 +263,7 @@ class QuoteWidgetProvider : AppWidgetProvider() {
         private const val ACTION_SYNC_ALL = "com.quotevault.app.widget.ACTION_SYNC_ALL"
         private const val ACTION_ROTATE_ALL = "com.quotevault.app.widget.ACTION_ROTATE_ALL"
         private const val ACTION_FAVOURITE = "com.quotevault.app.widget.ACTION_FAVOURITE"
+        private const val ACTION_DELETE = "com.quotevault.app.widget.ACTION_DELETE"
         const val EXTRA_QUOTE_ID = "com.quotevault.app.widget.EXTRA_QUOTE_ID"
         private const val TAG = "QuoteWidgetProvider"
         private const val PREFERENCES = WidgetAppearance.PREFERENCES

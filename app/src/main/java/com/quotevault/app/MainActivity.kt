@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FileUpload
@@ -136,6 +137,9 @@ private fun QuoteVaultApp(
     var showAllQuotes by remember { mutableStateOf(initialShowAllQuotes) }
     var editingQuote by remember { mutableStateOf<Quote?>(null) }
     var deletingQuote by remember { mutableStateOf<Quote?>(null) }
+    var directQuoteText by remember { mutableStateOf("") }
+    var directQuoteSource by remember { mutableStateOf("") }
+    var directQuoteAuthor by remember { mutableStateOf("") }
 
     suspend fun refreshLibrary() {
         library = withContext(Dispatchers.IO) { dao.getAll() }
@@ -339,6 +343,7 @@ private fun QuoteVaultApp(
                             when {
                                 selectedTab == 1 -> "QuoteVault"
                                 selectedTab == 2 -> "Widget appearance"
+                                selectedTab == 3 -> "Add quotes"
                                 showAllQuotes -> "All Quotes"
                                 currentSource != null -> currentSource.title
                                 else -> "QuoteVault"
@@ -349,6 +354,7 @@ private fun QuoteVaultApp(
                             when {
                                 selectedTab == 1 -> "Import your highlights"
                                 selectedTab == 2 -> "Background and opacity"
+                                selectedTab == 3 -> "One quote per line"
                                 showAllQuotes -> "${library.size} highlights"
                                 currentSource != null -> "${currentSource.quotes.size} highlights"
                                 else -> "Your personal highlight library"
@@ -390,6 +396,16 @@ private fun QuoteVaultApp(
                     },
                     icon = { Icon(Icons.Default.Settings, contentDescription = null) },
                     label = { Text("Widget") }
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 3,
+                    onClick = {
+                        selectedTab = 3
+                        selectedSourceKey = null
+                        showAllQuotes = false
+                    },
+                    icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                    label = { Text("Add") }
                 )
             }
         }
@@ -454,6 +470,64 @@ private fun QuoteVaultApp(
                 )
             } else if (selectedTab == 2) {
                 WidgetSettingsScreen()
+            } else if (selectedTab == 3) {
+                AddQuotesScreen(
+                    quoteText = directQuoteText,
+                    onQuoteTextChange = { directQuoteText = it },
+                    source = directQuoteSource,
+                    onSourceChange = { directQuoteSource = it },
+                    author = directQuoteAuthor,
+                    onAuthorChange = { directQuoteAuthor = it },
+                    busy = busy,
+                    onAdd = {
+                        val lines = directQuoteText.lineSequence()
+                            .map { it.trim() }
+                            .filter { it.isNotEmpty() }
+                            .toList()
+                        if (lines.isEmpty()) {
+                            scope.launch { snackbarHostState.showSnackbar("Enter at least one quote.") }
+                        } else {
+                            scope.launch {
+                                busy = true
+                                try {
+                                    val existing = withContext(Dispatchers.IO) {
+                                        dao.getAllNormalizedTexts().toMutableSet()
+                                    }
+                                    var duplicates = 0
+                                    val newQuotes = lines.mapNotNull { line ->
+                                        val normalized = normalizeQuote(line)
+                                        if (!existing.add(normalized)) {
+                                            duplicates++
+                                            null
+                                        } else {
+                                            Quote(
+                                                text = line,
+                                                normalizedText = normalized,
+                                                source = directQuoteSource.trim().takeIf { it.isNotEmpty() },
+                                                author = directQuoteAuthor.trim().takeIf { it.isNotEmpty() }
+                                            )
+                                        }
+                                    }
+                                    val inserted = if (newQuotes.isNotEmpty()) {
+                                        withContext(Dispatchers.IO) { dao.insertAll(newQuotes) }
+                                    } else emptyList()
+                                    val added = inserted.count { it != -1L }
+                                    duplicates += newQuotes.size - added
+                                    refreshLibrary()
+                                    QuoteWidgetProvider.refreshAll(context)
+                                    directQuoteText = ""
+                                    snackbarHostState.showSnackbar(
+                                        "$added quote(s) added${if (duplicates > 0) ", $duplicates duplicate(s) skipped" else ""}."
+                                    )
+                                } catch (e: Exception) {
+                                    snackbarHostState.showSnackbar(e.message ?: "Unable to add quotes.")
+                                } finally {
+                                    busy = false
+                                }
+                            }
+                        }
+                    }
+                )
             } else {
                 when {
                     showAllQuotes -> AllQuotesScreen(
@@ -480,6 +554,76 @@ private fun QuoteVaultApp(
     }
 }
 
+
+@Composable
+private fun AddQuotesScreen(
+    quoteText: String,
+    onQuoteTextChange: (String) -> Unit,
+    source: String,
+    onSourceChange: (String) -> Unit,
+    author: String,
+    onAuthorChange: (String) -> Unit,
+    busy: Boolean,
+    onAdd: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text("Add quotes directly", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text(
+            "Enter or paste multiple quotes. Each non-empty line will be saved as a separate quote.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        OutlinedTextField(
+            value = quoteText,
+            onValueChange = onQuoteTextChange,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Quotes") },
+            placeholder = { Text("First quote\nSecond quote\nThird quote") },
+            minLines = 8,
+            maxLines = 16,
+            enabled = !busy
+        )
+        Text(
+            "${quoteText.lineSequence().count { it.isNotBlank() }} quote line(s)",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        OutlinedTextField(
+            value = source,
+            onValueChange = onSourceChange,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Source / Book (optional)") },
+            singleLine = true,
+            enabled = !busy
+        )
+        OutlinedTextField(
+            value = author,
+            onValueChange = onAuthorChange,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Author (optional)") },
+            singleLine = true,
+            enabled = !busy
+        )
+        Button(
+            onClick = onAdd,
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !busy && quoteText.lineSequence().any { it.isNotBlank() }
+        ) {
+            if (busy) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+            else Icon(Icons.Default.Add, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text(if (busy) "Adding..." else "Add quotes to library")
+        }
+        Text(
+            "Blank lines are ignored. Existing quotes and repeated lines are skipped automatically.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
 
 @Composable
 private fun WidgetSettingsScreen() {
