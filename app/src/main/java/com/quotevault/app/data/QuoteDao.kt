@@ -6,6 +6,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
+import androidx.room.Transaction
 
 @Dao
 interface QuoteDao {
@@ -32,6 +33,18 @@ interface QuoteDao {
 
     @Delete
     suspend fun delete(quote: Quote): Int
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAllReplacing(quotes: List<Quote>)
+
+    @Query("DELETE FROM quotes")
+    suspend fun deleteAll()
+
+    @Transaction
+    suspend fun replaceAll(quotes: List<Quote>) {
+        deleteAll()
+        if (quotes.isNotEmpty()) insertAllReplacing(quotes)
+    }
 
     @Query("SELECT COUNT(*) FROM quotes")
     suspend fun count(): Int

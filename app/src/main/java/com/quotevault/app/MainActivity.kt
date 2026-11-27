@@ -18,6 +18,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Backup
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FileUpload
@@ -34,6 +36,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.quotevault.app.data.Quote
 import com.quotevault.app.data.QuoteDatabase
+import com.quotevault.app.data.QuoteBackupManager
 import com.quotevault.app.importer.CsvParser
 import com.quotevault.app.importer.ImportedQuote
 import com.quotevault.app.widget.QuoteWidgetProvider
@@ -140,6 +143,7 @@ private fun QuoteVaultApp(
     var directQuoteText by remember { mutableStateOf("") }
     var directQuoteSource by remember { mutableStateOf("") }
     var directQuoteAuthor by remember { mutableStateOf("") }
+    var pendingRestoreQuotes by remember { mutableStateOf<List<Quote>?>(null) }
 
     suspend fun refreshLibrary() {
         library = withContext(Dispatchers.IO) { dao.getAll() }
@@ -291,6 +295,50 @@ private fun QuoteVaultApp(
         }
     }
 
+    val backupCreator = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri: Uri? ->
+        if (uri != null) {
+            scope.launch {
+                busy = true
+                try {
+                    val count = withContext(Dispatchers.IO) {
+                        val quotes = dao.getAll()
+                        QuoteBackupManager.writeBackup(context, uri, quotes)
+                        quotes.size
+                    }
+                    snackbarHostState.showSnackbar("Backup created successfully: $count quote(s).")
+                } catch (e: Exception) {
+                    snackbarHostState.showSnackbar(e.message ?: "Unable to create backup.")
+                } finally {
+                    busy = false
+                }
+            }
+        }
+    }
+
+    val backupRestorer = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            scope.launch {
+                busy = true
+                try {
+                    val restoredQuotes = withContext(Dispatchers.IO) {
+                        context.contentResolver.openInputStream(uri)?.use {
+                            QuoteBackupManager.readBackup(it)
+                        } ?: error("Could not read the selected backup file.")
+                    }
+                    pendingRestoreQuotes = restoredQuotes
+                } catch (e: Exception) {
+                    snackbarHostState.showSnackbar(e.message ?: "This is not a valid QuoteVault backup.")
+                } finally {
+                    busy = false
+                }
+            }
+        }
+    }
+
     val sourceGroups = remember(library) { buildSourceGroups(library) }
     val currentSource = sourceGroups.firstOrNull { it.key == selectedSourceKey }
 
@@ -323,6 +371,45 @@ private fun QuoteVaultApp(
         )
     }
 
+    if (pendingRestoreQuotes != null) {
+        AlertDialog(
+            onDismissRequest = { pendingRestoreQuotes = null },
+            title = { Text("Replace current library?") },
+            text = {
+                Text(
+                    "This backup contains ${pendingRestoreQuotes!!.size} quote(s). " +
+                            "Restoring it will replace all quotes currently stored on this device, " +
+                            "including favourites. This cannot be undone."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !busy,
+                    onClick = {
+                        val restoreItems = pendingRestoreQuotes ?: return@TextButton
+                        scope.launch {
+                            busy = true
+                            try {
+                                withContext(Dispatchers.IO) { dao.replaceAll(restoreItems) }
+                                refreshLibrary()
+                                QuoteWidgetProvider.refreshAll(context)
+                                pendingRestoreQuotes = null
+                                snackbarHostState.showSnackbar("Restore completed: ${restoreItems.size} quote(s).")
+                            } catch (e: Exception) {
+                                snackbarHostState.showSnackbar(e.message ?: "Unable to restore backup.")
+                            } finally {
+                                busy = false
+                            }
+                        }
+                    }
+                ) { Text("Replace library", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRestoreQuotes = null }) { Text("Cancel") }
+            }
+        )
+    }
+
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
@@ -344,6 +431,7 @@ private fun QuoteVaultApp(
                                 selectedTab == 1 -> "QuoteVault"
                                 selectedTab == 2 -> "Widget appearance"
                                 selectedTab == 3 -> "Add quotes"
+                                selectedTab == 4 -> "Backup & restore"
                                 showAllQuotes -> "All Quotes"
                                 currentSource != null -> currentSource.title
                                 else -> "QuoteVault"
@@ -355,6 +443,7 @@ private fun QuoteVaultApp(
                                 selectedTab == 1 -> "Import your highlights"
                                 selectedTab == 2 -> "Background and opacity"
                                 selectedTab == 3 -> "One quote per line"
+                                selectedTab == 4 -> "Protect your quote library"
                                 showAllQuotes -> "${library.size} highlights"
                                 currentSource != null -> "${currentSource.quotes.size} highlights"
                                 else -> "Your personal highlight library"
@@ -406,6 +495,16 @@ private fun QuoteVaultApp(
                     },
                     icon = { Icon(Icons.Default.Add, contentDescription = null) },
                     label = { Text("Add") }
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 4,
+                    onClick = {
+                        selectedTab = 4
+                        selectedSourceKey = null
+                        showAllQuotes = false
+                    },
+                    icon = { Icon(Icons.Default.Backup, contentDescription = null) },
+                    label = { Text("Backup") }
                 )
             }
         }
@@ -528,6 +627,16 @@ private fun QuoteVaultApp(
                         }
                     }
                 )
+            } else if (selectedTab == 4) {
+                BackupRestoreScreen(
+                    quoteCount = library.size,
+                    busy = busy,
+                    onCreateBackup = {
+                        val date = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(java.util.Date())
+                        backupCreator.launch("QuoteVault-Backup-$date.qvbackup")
+                    },
+                    onRestoreBackup = { backupRestorer.launch(arrayOf("application/json", "application/octet-stream", "*/*")) }
+                )
             } else {
                 when {
                     showAllQuotes -> AllQuotesScreen(
@@ -619,6 +728,49 @@ private fun AddQuotesScreen(
         }
         Text(
             "Blank lines are ignored. Existing quotes and repeated lines are skipped automatically.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun BackupRestoreScreen(
+    quoteCount: Int,
+    busy: Boolean,
+    onCreateBackup: () -> Unit,
+    onRestoreBackup: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Card {
+            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Default.Backup, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Text("Back up your library", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("Create one portable .qvbackup file containing all ${quoteCount} quote(s), including source details, favourites and import dates.")
+                Button(onClick = onCreateBackup, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.Backup, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (busy) "Please wait…" else "Create backup file")
+                }
+            }
+        }
+        Card {
+            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Default.Restore, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Text("Restore your library", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("Choose a previously created QuoteVault backup. You will be asked to confirm before the current library is replaced.")
+                OutlinedButton(onClick = onRestoreBackup, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.Restore, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Choose backup file")
+                }
+            }
+        }
+        Text(
+            "Keep a copy of your backup somewhere safe, such as Google Drive or your computer. Backups are not uploaded automatically. Widget appearance and refresh preferences are stored separately and are not changed by restore.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
